@@ -3,8 +3,8 @@ import torch.nn as nn
 from collections import OrderedDict
 
 
-class KSModel(nn.Module):
-    def __init__(self, channel=512, kernels=[1, 3, 5, 7], reduction=2, group=1, L=32):
+class SKModel(nn.Module):
+    def __init__(self, channel=512, kernels=[3, 5], reduction=2, group=1, L=32):
         super().__init__()
         self.d = max(L, channel // reduction)
         self.convs = nn.ModuleList([])
@@ -107,7 +107,7 @@ class SaELayer(nn.Module):
         super(SaELayer, self).__init__()
         assert in_channel>=reduction and in_channel%reduction==0,'invalid in_channel in SaElayer'
         self.reduction = reduction
-        self.cardinality=4
+        self.cardinality=2
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         #cardinality 1
         self.fc1 = nn.Sequential(
@@ -119,17 +119,7 @@ class SaELayer(nn.Module):
             nn.Linear(in_channel, in_channel // self.reduction, bias=False),
             nn.ReLU(inplace=True)
         )
-        # cardinality 3
-        self.fc3 = nn.Sequential(
-            nn.Linear(in_channel, in_channel // self.reduction, bias=False),
-            nn.ReLU(inplace=True)
-        )
-        # cardinality 4
-        self.fc4 = nn.Sequential(
-            nn.Linear(in_channel, in_channel // self.reduction, bias=False),
-            nn.ReLU(inplace=True)
-        )
-
+     
         self.fc = nn.Sequential(
             nn.Linear(in_channel//self.reduction*self.cardinality, in_channel, bias=False),
             nn.Sigmoid()
@@ -140,18 +130,16 @@ class SaELayer(nn.Module):
         y = self.avg_pool(x).view(b, c)
         y1 = self.fc1(y)
         y2 = self.fc2(y)
-        y3 = self.fc3(y)
-        y4 = self.fc4(y)
-        y_concate = torch.cat([y1,y2,y3,y4],dim=1)
+        y_concate = torch.cat([y1,y2],dim=1)
         y_ex_dim = self.fc(y_concate).view(b,c,1,1)
 
         return x * y_ex_dim.expand_as(x)
 
 
 def conv_block_mo(in_channel, out_channel, kernel_size=3, strid=1, groups=1,
-               activation="h-swish"):  # 定义卷积块,conv+bn+h-swish/relu
-    padding = (kernel_size - 1) // 2  # 计算padding
-    assert activation in ["h-swish", "relu"]  # 激活函数在h-swish和relu中选择
+               activation="h-swish"):  
+    padding = (kernel_size - 1) // 2  
+    assert activation in ["h-swish", "relu"]  
     return nn.Sequential(
         nn.Conv2d(in_channel, out_channel, kernel_size, strid, padding=padding, groups=groups, bias=False),  # conv
         nn.BatchNorm2d(out_channel),  # bn
@@ -160,22 +148,22 @@ def conv_block_mo(in_channel, out_channel, kernel_size=3, strid=1, groups=1,
 
 
 
-class SEblock(nn.Module):  # 定义Squeeze and Excite注意力机制模块
-    def __init__(self, channel):  # 初始化方法
-        super(SEblock, self).__init__()  # 继承初始化方法
+class SEblock(nn.Module): 
+    def __init__(self, channel):  
+        super(SEblock, self).__init__() 
 
-        self.channel = channel  # 通道数
-        self.attention = nn.Sequential(  # 定义注意力模块
-            nn.AdaptiveAvgPool2d(1),  # avgpool
-            nn.Conv2d(self.channel, self.channel // 4, 1, 1, 0),  # 1x1conv，代替全连接
-            nn.ReLU(inplace=True),  # relu
-            nn.Conv2d(self.channel // 4, self.channel, 1, 1, 0),  # 1x1conv，代替全连接
-            nn.Hardswish(inplace=True)  # h-swish，此处原文图中为hard-alpha，未注明具体激活函数，这里使用h-swish
+        self.channel = channel 
+        self.attention = nn.Sequential(  
+            nn.AdaptiveAvgPool2d(1),  
+            nn.Conv2d(self.channel, self.channel // 4, 1, 1, 0),  
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.channel // 4, self.channel, 1, 1, 0),  
+            nn.Hardswish(inplace=True) 
         )
 
-    def forward(self, x):  # 前传函数
-        a = self.attention(x)  # 通道注意力权重
-        return a * x  # 返回乘积
+    def forward(self, x):
+        a = self.attention(x) 
+        return a * x
 
 
 class HireAtt(nn.Module):
@@ -202,64 +190,64 @@ class HireAtt(nn.Module):
         return x_out
 
 
-class bneck(nn.Module):  # 定义改进的倒置残差结构,对应原文中的bneck
+class bneck(nn.Module): 
     def __init__(self, in_channel, out_channel, kernel_size=3, strid=1, t=6., se=True, activation="h-swish", ks=False, ca=False):  # 初始化方法
-        super(bneck, self).__init__()  # 继承初始化方法
-        self.in_channel = in_channel  # 输入通道数
-        self.out_channel = out_channel  # 输出通道数
-        self.kernel_size = kernel_size  # 卷积核尺寸
-        self.strid = strid  # 步长
-        self.t = t  # 中间层通道扩大倍数，对应原文expansion ratio
-        self.hidden_channel = int(in_channel * t)  # 计算中间层通道数
-        self.se = se  # 是否使用SE注意力机制模块
-        self.activation = activation  # 激活函数形式
+        super(bneck, self).__init__() 
+        self.in_channel = in_channel  
+        self.out_channel = out_channel  
+        self.kernel_size = kernel_size  
+        self.strid = strid  
+        self.t = t  
+        self.hidden_channel = int(in_channel * t) 
+        self.se = se  
+        self.activation = activation 
 
-        layers = []  # 存放模型结构
-        if self.t != 1:  # 如果expansion ratio不为1
+        layers = []
+        if self.t != 1:  
             layers += [conv_block_mo(self.in_channel, self.hidden_channel, kernel_size=1,
-                                  activation=self.activation)]  # 添加conv+bn+h-swish/relu
+                                  activation=self.activation)] 
         layers += [conv_block_mo(self.hidden_channel, self.hidden_channel, kernel_size=self.kernel_size, strid=self.strid,
                               groups=self.hidden_channel,
-                              activation=self.activation)]  # 添加conv+bn+h-swish/relu，此处使用组数等于输入通道数的分组卷积实现depthwise conv
-        if self.se:  # 如果使用SE注意力机制模块
-            layers += [SEblock(self.hidden_channel)]  # 添加SEblock
-        layers += [conv_block_mo(self.hidden_channel, self.out_channel, kernel_size=1)[:-1]]  # 添加1x1conv+bn，此处不再进行激活函数
-        self.residul_block = nn.Sequential(*layers)  # 倒置残差结构块
-        self.ks = ks
+                              activation=self.activation)]  
+        if self.se:  
+            layers += [SEblock(self.hidden_channel)]  
+        layers += [conv_block_mo(self.hidden_channel, self.out_channel, kernel_size=1)[:-1]]  
+        self.residul_block = nn.Sequential(*layers)  
+        self.sk = sk
         self.ca = ca
-        if self.ks:
-            self.ks_model = KSModel(out_channel)
+        if self.sk:
+            self.sk_model = skModel(out_channel)
         if self.ca:
             self.ca_model = CoordAtt(out_channel, out_channel)
 
-    def forward(self, x):  # 前传函数
-        if self.strid == 1 and self.in_channel == self.out_channel:  # 如果卷积步长为1且前后通道数一致，则连接残差边
+    def forward(self, x): 
+        if self.strid == 1 and self.in_channel == self.out_channel: 
             out = x + self.residul_block(x)  # x+F(x)
-        else:  # 否则不进行残差连接
+        else:
             out = self.residul_block(x)  # F(x)
-        if self.ks:
-            out = self.ks_model(out) + out
+        if self.sk:
+            out = self.sk_model(out) + out
         if self.ca:
             out = self.ca_model(out) + out
         return out
 
 
-class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
-    def __init__(self, num_classes, model_size="large", ks=False, ca=False, tr=False):  # 初始化方法
-        super(MobileNetV3, self).__init__()  # 继承初始化方法
+class MobileNetV3(nn.Module):
+    def __init__(self, num_classes, model_size="large", ks=False, ca=False, tr=False):  
+        super(MobileNetV3, self).__init__() 
 
-        self.num_classes = num_classes  # 类别数量
+        self.num_classes = num_classes  
         self.tr = tr
-        assert model_size in ["small", "large"]  # 模型尺寸，仅支持small和large两种
-        self.model_size = model_size  # 模型尺寸选择
-        if self.model_size == "small":  # 如果是small模型
+        assert model_size in ["small", "large"]  
+        self.model_size = model_size
+        if self.model_size == "small":  
             self.feature = nn.Sequential(  # 特征提取部分
                 conv_block_mo(3, 16, strid=2, activation="h-swish"),  # conv+bn+h-swish,(n,3,224,224)-->(n,16,112,112)
                 bneck(16, 16, kernel_size=3, strid=2, t=1, se=True, activation="relu"),
                 # bneck,(n,16,112,112)-->(n,16,56,56)
                 bneck(16, 24, kernel_size=3, strid=2, t=4.5, se=False, activation="relu"),
                 # bneck,(n,16,56,56)-->(n,24,28,28)
-                bneck(24, 24, kernel_size=3, strid=1, t=88 / 24, se=False, activation="relu", ks=ks),
+                bneck(24, 24, kernel_size=3, strid=1, t=88 / 24, se=False, activation="relu", sk=sk),
                 # bneck,(n,24,28,28)-->(n,24,28,28)
                 bneck(24, 40, kernel_size=5, strid=2, t=4, se=True, activation="h-swish"),
                 # bneck,(n,24,28,28)-->(n,40,14,14)
@@ -269,7 +257,7 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
                 # bneck,(n,40,14,14)-->(n,40,14,14)
                 bneck(40, 48, kernel_size=5, strid=1, t=3, se=True, activation="h-swish"),
                 # bneck,(n,40,14,14)-->(n,48,14,14)
-                bneck(48, 48, kernel_size=5, strid=1, t=3, se=True, activation="h-swish", ks=ks),
+                bneck(48, 48, kernel_size=5, strid=1, t=3, se=True, activation="h-swish", sk=sk),
                 # bneck,(n,48,14,14)-->(n,48,14,14)
                 bneck(48, 96, kernel_size=5, strid=2, t=6, se=True, activation="h-swish"),
                 # bneck,(n,48,14,14)-->(n,96,7,7)
@@ -278,7 +266,6 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
                 bneck(96, 96, kernel_size=5, strid=1, t=6, se=True, activation="h-swish", ca=ca),
                 # bneck,(n,96,7,7)-->(n,96,7,7)
                 conv_block_mo(96, 576, kernel_size=1, activation="h-swish")
-                # conv+bn+h-swish,(n,96,7,7)-->(n,576,7,7),此处没有使用SE注意力模块
             )
 
             self.classifier = nn.Sequential(  # 分类部分
@@ -296,7 +283,7 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
                     # bneck,(n,16,112,112)-->(n,16,112,112)
                     bneck(16, 24, kernel_size=3, strid=2, t=4, se=False, activation="relu"),
                     # bneck,(n,16,112,112)-->(n,24,56,56)
-                    bneck(24, 24, kernel_size=3, strid=1, t=3, se=False, activation="relu", ks=ks),
+                    bneck(24, 24, kernel_size=3, strid=1, t=3, se=False, activation="relu", sk=sk),
                     # bneck,(n,24,56,56)-->(n,24,56,56)
                 )
                 self.feature2 = nn.Sequential(
@@ -304,7 +291,7 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
                     # bneck,(n,24,56,56)-->(n,40,28,28)
                     bneck(40, 40, kernel_size=5, strid=1, t=3, se=True, activation="relu"),
                     # bneck,(n,40,28,28)-->(n,40,28,28)
-                    bneck(40, 40, kernel_size=5, strid=1, t=3, se=True, activation="relu", ks=ks),
+                    bneck(40, 40, kernel_size=5, strid=1, t=3, se=True, activation="relu", sk=sk),
                     # bneck,(n,40,28,28)-->(n,40,28,28)
                 )
                 self.feature3 = nn.Sequential(
@@ -339,13 +326,13 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
                     # bneck,(n,16,112,112)-->(n,16,112,112)
                     bneck(16, 24, kernel_size=3, strid=2, t=4, se=False, activation="relu"),
                     # bneck,(n,16,112,112)-->(n,24,56,56)
-                    bneck(24, 24, kernel_size=3, strid=1, t=3, se=False, activation="relu", ks=ks),
+                    bneck(24, 24, kernel_size=3, strid=1, t=3, se=False, activation="relu", sk=sk),
                     # bneck,(n,24,56,56)-->(n,24,56,56)
                     bneck(24, 40, kernel_size=5, strid=2, t=3, se=True, activation="relu"),
                     # bneck,(n,24,56,56)-->(n,40,28,28)
                     bneck(40, 40, kernel_size=5, strid=1, t=3, se=True, activation="relu"),
                     # bneck,(n,40,28,28)-->(n,40,28,28)
-                    bneck(40, 40, kernel_size=5, strid=1, t=3, se=True, activation="relu", ks=ks),
+                    bneck(40, 40, kernel_size=5, strid=1, t=3, se=True, activation="relu", sk=sk),
                     # bneck,(n,40,28,28)-->(n,40,28,28)
                     bneck(40, 80, kernel_size=3, strid=2, t=6, se=False, activation="h-swish"),
                     # bneck,(n,40,28,28)-->(n,80,14,14)
@@ -378,12 +365,12 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
                 nn.Conv2d(1280, self.num_classes, 1, 1, 0)  # 1x1conv,(n,1280,1,1)-->(n,num_classes,1,1)
             )
 
-    def forward(self, x):  # 前传函数
+    def forward(self, x):  
         if self.tr:
-            x1 = self.feature1(x)  # 提取特征
-            x2 = self.feature2(x1)  # 提取特征
-            x3 = self.feature3(x2)  # 提取特征
-            x4 = self.feature4(x3)  # 提取特征
+            x1 = self.feature1(x)  
+            x2 = self.feature2(x1)  
+            x3 = self.feature3(x2)  
+            x4 = self.feature4(x3) 
             x = self.tr_model(x1, x2, x3, x4)
         else:
             x = self.feature(x)  # 提取特征
@@ -392,55 +379,3 @@ class MobileNetV3(nn.Module):  # 定义MobileNet v3网络
 
 
 
-class TransformerLayer(nn.Module):
-    # Transformer layer https://arxiv.org/abs/2010.11929 (LayerNorm layers removed for better performance)
-    def __init__(self, c, num_heads):
-        super().__init__()
-        self.q = nn.Linear(c, c, bias=False)
-        self.k = nn.Linear(c, c, bias=False)
-        self.v = nn.Linear(c, c, bias=False)
-        self.ma = nn.MultiheadAttention(embed_dim=c, num_heads=num_heads)
-        self.fc1 = nn.Linear(c, c, bias=False)
-        self.fc2 = nn.Linear(c, c, bias=False)
-
-    def forward(self, x):
-        x = self.ma(self.q(x), self.k(x), self.v(x))[0] + x
-        x = self.fc2(self.fc1(x)) + x
-        return x
-
-
-class Conv(nn.Module):
-    # Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)
-    default_act = nn.SiLU()  # default activation
-
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
-        super().__init__()
-        self.conv = nn.Conv2d(c1, c2, kernel_size=k, stride=s, padding=0, groups=g, dilation=d, bias=False)
-        self.bn = SyncBatchNorm(c2)
-        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
-
-    def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
-
-    def forward_fuse(self, x):
-        return self.act(self.conv(x))
-
-
-class TransformerBlock(nn.Module):
-    # Vision Transformer https://arxiv.org/abs/2010.11929
-    def __init__(self, c1, c2, num_heads, num_layers):
-        super().__init__()
-        self.conv = None
-        if c1 != c2:
-            # 如果TransformerBlock，即ViT模块输入和输出通道不同，提前通过一个卷积层让通道相同
-            self.conv = Conv(c1, c2)
-        self.linear = nn.Linear(c2, c2)  # learnable position embedding
-        self.tr = nn.Sequential(*(TransformerLayer(c2, num_heads) for _ in range(num_layers)))
-        self.c2 = c2
-
-    def forward(self, x):
-        if self.conv is not None:
-            x = self.conv(x)
-        b, _, w, h = x.shape
-        p = x.flatten(2).permute(2, 0, 1)
-        return self.tr(p + self.linear(p)).permute(1, 2, 0).reshape(b, self.c2, w, h)
